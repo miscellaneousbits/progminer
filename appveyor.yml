@@ -81,6 +81,6 @@ deploy:
   draft: false
   artifact: progminer
   auth_token:
-    secure: YRmCbHsw250EwggtAnikejl2VQdHI19qAx0lPv86j9bq4mit4qxnxiRqRMsBEf3g
+    secure: imgc5w/vNRlZoksce2rWx+b78mi7kt11HD9eJ9gQkJvy+fuzWvkvxXXjp6cuptzk
   on:
     appveyor_repo_tag: true
