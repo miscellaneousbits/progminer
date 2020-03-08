@@ -374,6 +374,8 @@ void CUDAMiner::compileKernel(uint64_t period_seed, uint64_t dag_elms, CUfunctio
 #endif
     tmpDir.append("/kernel.");
     tmpDir.append(std::to_string(Index()));
+    tmpDir.append(".");
+    tmpDir.append(std::to_string(period_seed));
     tmpDir.append(".cu");
 #ifdef DEV_BUILD
     cudalog << "Dumping " << tmpDir;

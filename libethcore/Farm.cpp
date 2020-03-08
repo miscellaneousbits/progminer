@@ -487,12 +487,8 @@ void Farm::submitProof(Solution const& _s)
 
 void Farm::submitProofAsync(Solution const& _s)
 {
-#ifdef DEV_BUILD
-    const bool dbuild = true;
-#else
-    const bool dbuild = false;
-#endif
-    if (!m_Settings.noEval || dbuild)
+    bool exit = false;
+    if (!m_Settings.noEval || DEV_BUILD)
     {
         Result r = EthashAux::eval(_s.work.epoch, _s.work.block, _s.work.header, _s.nonce);
         if (r.value > _s.work.boundary)
@@ -500,10 +496,15 @@ void Farm::submitProofAsync(Solution const& _s)
             accountSolution(_s.midx, SolutionAccountingEnum::Failed);
             cwarn << "GPU " << _s.midx
                   << " gave incorrect result. Lower overclocking values if it happens frequently.";
-            return;
+            exit = true;
         }
-        if (dbuild && (_s.mixHash != r.mixHash))
-            cwarn << "GPU " << _s.midx << " mix missmatch";
+        if (DEV_BUILD && (_s.mixHash != r.mixHash))
+        {
+            cwarn << " mix missmatch";
+            cwarn << " GPU MIX HASH " << _s.mixHash;
+	}
+        if (exit)
+            return;
         m_onSolutionFound(Solution{_s.nonce, r.mixHash, _s.work, _s.tstamp, _s.midx});
     }
     else
