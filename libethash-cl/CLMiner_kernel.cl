@@ -11,6 +11,8 @@
 #define PLATFORM OPENCL_PLATFORM_AMD
 #endif
 
+#define FNV_OFFSET_BASIS 0x811c9dc5
+
 #ifdef cl_clang_storage_class_specifiers
 #pragma OPENCL EXTENSION cl_clang_storage_class_specifiers : enable
 #endif
@@ -73,10 +75,16 @@ void keccak_f800_round(uint32_t st[25], const int r)
     st[0] ^= keccakf_rndc[r];
 }
 
+uint64_t seed64_from_seed256(hash32_t seed_256)
+{
+    uint64_t res = (uint64_t)seed_256.uint32s[1] << 32 | seed_256.uint32s[0];
+    return as_ulong(as_uchar8(res).s76543210);
+}
+
 // Keccak - implemented as a variant of SHAKE
 // The width is 800, with a bitrate of 576, a capacity of 224, and no padding
 // Only need 64 bits of output for mining
-uint64_t keccak_f800(__constant hash32_t const* g_header, uint64_t seed, hash32_t digest)
+hash32_t keccak_f800_256(__constant hash32_t const* g_header, uint64_t seed, hash32_t digest)
 {
     uint32_t st[25];
 
@@ -96,9 +104,16 @@ uint64_t keccak_f800(__constant hash32_t const* g_header, uint64_t seed, hash32_
     // last round can be simplified due to partial output
     keccak_f800_round(st, 21);
 
-    // Byte swap so byte 0 of hash is MSB of result
-    uint64_t res = (uint64_t)st[1] << 32 | st[0];
-    return as_ulong(as_uchar8(res).s76543210);
+    hash32_t r;
+    for (int i = 0; i < 8; i++)
+	r.uint32s[i] = st[i];
+
+    return r;
+}
+
+uint64_t keccak_f800_64(__constant hash32_t const* g_header, uint64_t seed, hash32_t digest)
+{
+    return seed64_from_seed256(keccak_f800_256(g_header, seed, digest));
 }
 
 #define fnv1a(h, d) (h = (h ^ d) * 0x1000193)
@@ -123,19 +138,20 @@ uint32_t kiss99(kiss99_t* st)
     return ((MWC ^ st->jcong) + st->jsr);
 }
 
-void fill_mix(uint64_t seed, uint32_t lane_id, uint32_t mix[PROGPOW_REGS])
+void fill_mix(hash32_t seed, uint32_t lane_id, uint32_t mix[PROGPOW_REGS])
 {
     // Use FNV to expand the per-warp seed to per-lane
     // Use KISS to expand the per-lane seed to fill mix
-    uint32_t fnv_hash = 0x811c9dc5;
     kiss99_t st;
-    st.z = fnv1a(fnv_hash, seed);
-    st.w = fnv1a(fnv_hash, seed >> 32);
-    st.jsr = fnv1a(fnv_hash, lane_id);
-    st.jcong = fnv1a(fnv_hash, lane_id);
-#pragma unroll
+    uint32_t temp = FNV_OFFSET_BASIS;
+    fnv1a(temp, lane_id);
+    st.z = fnv1a(temp, seed.uint32s[0 + (lane_id & 1)]);
+    st.w = fnv1a(temp, seed.uint32s[2 + (lane_id & 1)]);
+    st.jsr = fnv1a(temp, seed.uint32s[4 + (lane_id & 1)]);
+    st.jcong = fnv1a(temp, seed.uint32s[6 + (lane_id & 1)]);
+    #pragma unroll
     for (int i = 0; i < PROGPOW_REGS; i++)
-        mix[i] = kiss99(&st);
+            mix[i] = kiss99(&st);
 }
 
 typedef struct
@@ -192,30 +208,31 @@ ethash_search(__global struct SearchResults* restrict g_output, __constant hash3
     for (int i = 0; i < 8; i++)
         digest.uint32s[i] = 0;
     // keccak(header..nonce)
-    uint64_t seed = keccak_f800(g_header, start_nonce + gid, digest);
+    hash32_t seed_256 = keccak_f800_256(g_header, start_nonce + gid, digest);
+    uint64_t seed_64 = seed64_from_seed256(seed_256);
 
     barrier(CLK_LOCAL_MEM_FENCE);
 
 #pragma unroll 1
     for (uint32_t h = 0; h < PROGPOW_LANES; h++)
     {
-        uint32_t mix[PROGPOW_REGS];
-
         // share the hash's seed across all lanes
         if (lane_id == h)
-            share[group_id].uint64s[0] = seed;
+            share[group_id].uint64s[0] = seed_64;
+
         barrier(CLK_LOCAL_MEM_FENCE);
         uint64_t hash_seed = share[group_id].uint64s[0];
 
         // initialize mix for all lanes
-        fill_mix(hash_seed, lane_id, mix);
+        uint32_t mix[PROGPOW_REGS];
+        fill_mix(seed_256, lane_id, mix);
 
 #pragma unroll 1
         for (uint32_t l = 0; l < PROGPOW_CNT_DAG; l++)
             progPowLoop(l, mix, g_dag, c_dag, share[0].uint64s, hack_false);
 
         // Reduce mix data to a per-lane 32-bit digest
-        uint32_t mix_hash = 0x811c9dc5;
+        uint32_t mix_hash = FNV_OFFSET_BASIS;
 #pragma unroll
         for (int i = 0; i < PROGPOW_REGS; i++)
             fnv1a(mix_hash, mix[i]);
@@ -223,7 +240,7 @@ ethash_search(__global struct SearchResults* restrict g_output, __constant hash3
         // Reduce all lanes to a single 256-bit digest
         hash32_t digest_temp;
         for (int i = 0; i < 8; i++)
-            digest_temp.uint32s[i] = 0x811c9dc5;
+            digest_temp.uint32s[i] = FNV_OFFSET_BASIS;
         share[group_id].uint32s[lane_id] = mix_hash;
         barrier(CLK_LOCAL_MEM_FENCE);
 #pragma unroll
@@ -237,7 +254,7 @@ ethash_search(__global struct SearchResults* restrict g_output, __constant hash3
         atomic_inc(&g_output->hashCount);
 
     // keccak(header .. keccak(header..nonce) .. digest);
-    if (keccak_f800(g_header, seed, digest) <= target)
+    if (keccak_f800_64(g_header, seed_64, digest) <= target)
     {
         uint slot = atomic_inc(&g_output->count);
         if (slot < MAX_OUTPUTS)
