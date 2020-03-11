@@ -216,13 +216,6 @@ ethash_search(__global struct SearchResults* restrict g_output, __constant hash3
 #pragma unroll 1
     for (uint32_t h = 0; h < PROGPOW_LANES; h++)
     {
-        // share the hash's seed across all lanes
-        if (lane_id == h)
-            share[group_id].uint64s[0] = seed_64;
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-        uint64_t hash_seed = share[group_id].uint64s[0];
-
         // initialize mix for all lanes
         uint32_t mix[PROGPOW_REGS];
         fill_mix(seed_256, lane_id, mix);
